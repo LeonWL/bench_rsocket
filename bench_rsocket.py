@@ -2,7 +2,11 @@
 # encoding: utf-8
 
 import argparse
+import csv
+import datetime
+import os
 import paramiko
+import re
 import subprocess
 import sys
 import time
@@ -55,6 +59,7 @@ class Server(object):
 class Shell(object):
 	def __init__(self, cmd, wait_time = 0):
 		self.cmd = cmd
+		self.stdout = None
 		self.run()
 
 	def run(self):
@@ -64,10 +69,37 @@ class Shell(object):
 			time.sleep(1)
 		if p.returncode != 0:
 			out, err = p.communicate()
-			print err
+			print(err)
 			sys.exit("Command '{0}' failed with code: {1}".format(
 				self.cmd, p.returncode))
+		self.stdout = "".join(p.stdout.readlines())
 
+class Result(object):
+	def __init__(self, out):
+		try:
+			self.out = out
+			m = re.search('tps = (\d+)(,|\.)(.+)including connections establishing(.+)', self.out)
+			self.tps = int(m.group(1))
+			m = re.search('number of transactions actually processed\: (\d+)', self.out)
+			self.trans = int(m.group(1))
+			m = re.search('latency average = (\d+)\.(\d+) ms', self.out)
+			self.avg_latency = float(m.group(1)+"."+m.group(2))
+		except AttributeError:
+			sys.exit("Can't parse stdout:\n{0}".format(self.out))
+
+class Writer(object):
+	def __init__(self, filename):
+		self.f = open(filename, "wb")
+		fieldnames = ["clients", "tps", "trans", "avg_latency"]
+		self.writer = csv.DictWriter(self.f, fieldnames)
+		self.writer.writeheader()
+
+	def add_value(self, clients, tps, trans, avg_latency):
+		self.writer.writerow({"clients": clients, "tps": tps, "trans": trans,
+			"avg_latency": avg_latency})
+
+	def close(self):
+		self.f.close()
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="rsocket benchmark tool",
@@ -110,16 +142,54 @@ if __name__ == "__main__":
 		help="Maximum number of clients",
 		default=100,
 		dest="clients")
-	parser.add_argument("--with-rsocket",
+	parser.add_argument("-R", "--with-rsocket",
 		help="Enable rsocket",
 		action="store_true",
 		default=False,
 		dest="with_rsocket")
+	parser.add_argument("-S", "--select-only",
+		help="Run select-only script",
+		action="store_true",
+		default=False,
+		dest="select_only")
 
 	args = parser.parse_args()
 
 	serv = Server(args.host, args.user, args.password, args.port,
 		args.with_rsocket, args.clients)
+	print("Initialize data directory...")
 	serv.init()
+	print("Run database server...")
 	serv.run()
+
+	print("Initialize pgbench database...\n")
+
+	with_rsocket = "--with-rsocket" if args.with_rsocket else ""
+	select_only = "--select-only" if args.select_only else ""
+
+	Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
+		args.host, with_rsocket, args.scale))
+
+	filename = "{0}{1}_clients_{2}.csv".format(
+		"rsocket_" if args.with_rsocket else "",
+		args.clients, datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"))
+
+	w = Writer(filename)
+
+	for i in range(0, args.clients):
+		print("Run pgbench for {0} clients...".format(i + 1))
+
+		out = Shell("pg_bin/bin/pgbench -h {0} {1} {2} -c {3} -T {4} -v pgbench".format(
+			args.host, with_rsocket, select_only, i + 1, args.time))
+		res = Result(out.stdout)
+
+		w.add_value(i + 1, res.tps, res.trans, res.avg_latency)
+		print("Test result: tps={0} trans={1} avg_latency={2}\n".format(
+			res.tps, res.trans, res.avg_latency))
+
+	w.close()
+
+	print("Stop database server. Remove data directory...")
 	serv.stop()
+
+	print("Finished")
