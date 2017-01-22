@@ -34,7 +34,11 @@ class Server(object):
 			self.__exec_command("""echo "listen_addresses = ''" >> bench_data/postgresql.conf""")
 			self.__exec_command(
 				"""echo "listen_rdma_addresses = '{0}'" >> bench_data/postgresql.conf""".format(self.host))
+
 		self.__exec_command("""echo "shared_buffers = 8GB" >> bench_data/postgresql.conf""")
+		self.__exec_command("""echo "work_mem = 50MB" >> bench_data/postgresql.conf""")
+		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> bench_data/postgresql.conf""")
+
 		self.__exec_command("""echo "fsync = off" >> bench_data/postgresql.conf""")
 		self.__exec_command("""echo "synchronous_commit = off" >> bench_data/postgresql.conf""")
 		if self.clients > 100:
@@ -101,6 +105,50 @@ class Writer(object):
 	def close(self):
 		self.f.close()
 
+class Test(object):
+	def __init__(self, server, scale, clients, run_time, select_only):
+		self.server = server
+		self.scale = scale
+		self.clients = clients
+		self.run_time = run_time
+		self.select_only = select_only
+
+	def run(self):
+		print("Initialize data directory...")
+		self.server.init()
+		print("Run database server...")
+		self.server.run()
+
+		print("Initialize pgbench database...\n")
+
+		with_rsocket = "--with-rsocket" if self.server.with_rsocket else ""
+		select_only = "--select-only" if self.select_only else ""
+
+		Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
+			self.server.host, with_rsocket, self.scale))
+
+		filename = "{0}_{1}_clients_{2}.csv".format(
+			"rsocket" if self.server.with_rsocket else "socket"
+			self.clients, datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"))
+
+		w = Writer(filename)
+
+		for i in range(0, self.clients):
+			print("Run pgbench for {0} clients...".format(i + 1))
+
+			out = Shell("pg_bin/bin/pgbench -h {0} {1} {2} -c {3} -T {4} -v pgbench".format(
+				self.server.host, with_rsocket, select_only, i + 1, self.run_time))
+			res = Result(out.stdout)
+
+			w.add_value(i + 1, res.tps, res.trans, res.avg_latency)
+			print("Test result: tps={0} trans={1} avg_latency={2}\n".format(
+				res.tps, res.trans, res.avg_latency))
+
+		w.close()
+
+		print("Stop database server. Remove data directory...")
+		self.server.stop()
+
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="rsocket benchmark tool",
 		add_help=False)
@@ -142,11 +190,6 @@ if __name__ == "__main__":
 		help="Maximum number of clients",
 		default=100,
 		dest="clients")
-	parser.add_argument("-R", "--with-rsocket",
-		help="Enable rsocket",
-		action="store_true",
-		default=False,
-		dest="with_rsocket")
 	parser.add_argument("-S", "--select-only",
 		help="Run select-only script",
 		action="store_true",
@@ -155,41 +198,16 @@ if __name__ == "__main__":
 
 	args = parser.parse_args()
 
+	# Run rsocket test
 	serv = Server(args.host, args.user, args.password, args.port,
-		args.with_rsocket, args.clients)
-	print("Initialize data directory...")
-	serv.init()
-	print("Run database server...")
-	serv.run()
+		True, args.clients)
+	test = Test(serv, args.scale, args.clients, args.time, args.select_only)
+	test.run()
 
-	print("Initialize pgbench database...\n")
-
-	with_rsocket = "--with-rsocket" if args.with_rsocket else ""
-	select_only = "--select-only" if args.select_only else ""
-
-	Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
-		args.host, with_rsocket, args.scale))
-
-	filename = "{0}{1}_clients_{2}.csv".format(
-		"rsocket_" if args.with_rsocket else "",
-		args.clients, datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"))
-
-	w = Writer(filename)
-
-	for i in range(0, args.clients):
-		print("Run pgbench for {0} clients...".format(i + 1))
-
-		out = Shell("pg_bin/bin/pgbench -h {0} {1} {2} -c {3} -T {4} -v pgbench".format(
-			args.host, with_rsocket, select_only, i + 1, args.time))
-		res = Result(out.stdout)
-
-		w.add_value(i + 1, res.tps, res.trans, res.avg_latency)
-		print("Test result: tps={0} trans={1} avg_latency={2}\n".format(
-			res.tps, res.trans, res.avg_latency))
-
-	w.close()
-
-	print("Stop database server. Remove data directory...")
-	serv.stop()
+	# Run socket test
+	serv = Server(args.host, args.user, args.password, args.port,
+		False, args.clients)
+	test = Test(serv, args.scale, args.clients, args.time, args.select_only)
+	test.run()
 
 	print("Finished")
