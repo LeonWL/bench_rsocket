@@ -4,16 +4,51 @@
 import argparse
 import csv
 import datetime
-import os
 import paramiko
-import re
-import subprocess
 import sys
-import time
 
-class Server(object):
-	def __init__(self, host, user, password, port, with_rsocket):
+class PrimaryServer(object):
+	def __init__(self, host, scale, with_rsocket):
 		self.host = host
+		self.scale = scale
+		self.with_rsocket = with_rsocket
+
+	def init(self):
+		Shell("pg_bin/bin/initdb -D repl_bench_data")
+
+		# Set configuration
+		with open("repl_bench_data/postgresql.auto.conf") as f:
+			if self.with_rsocket:
+				f.write("listen_addresses = ''")
+				f.write(
+					"listen_rdma_addresses = '{0}'".format(self.host))
+
+			f.write("shared_buffers = 8GB")
+			f.write("work_mem = 50MB")
+			f.write("maintenance_work_mem = 2GB")
+
+			f.write("fsync = off")
+			f.write("synchronous_commit = remote_write")
+
+			f.write("wal_level = hot_standby")
+			f.write("max_wal_senders = 2")
+			f.write("synchronous_standby_names = '*'")
+			f.write("hot_standby = on")
+
+	def run(self):
+		Shell("pg_bin/bin/initdb -w start -D repl_bench_data")
+		Shell("pg_bin/bin/createdb pgbench")
+		Shell("pg_bin/bin/pgbench -s {0} -i pgbench".format(self.scale))
+
+	def stop(self):
+		Shell("pg_bin/bin/initdb -w stop -D repl_bench_data")
+		Shell("rm -rf bench_data")
+
+class StandbyServer(object):
+	def __init__(self, primary_host, standby_host, user, password, port,
+		with_rsocket):
+		self.primary_host = primary_host
+		self.standby_host = standby_host
 		self.user = user
 		self.password = password
 		self.port = port
@@ -22,32 +57,24 @@ class Server(object):
 	def init(self):
 		client = paramiko.SSHClient()
 		client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-		client.connect(hostname=self.host, username=self.user,
+		client.connect(hostname=self.standby_host, username=self.user,
 			password=self.password, port=self.port)
 		self.client = client
 
-		self.__exec_command("pg_bin/bin/initdb -D bench_data")
+		self.__exec_command(("pg_bin/bin/pg_basebackup -D repl_bench_data "
+			"-x -R -h {0} {2}").format(self.primary_host,
+			"--with-rsocket" if self.with_rsocket else ""))
 
-		# Set configuration
-		if self.with_rsocket:
-			self.__exec_command("""echo "listen_addresses = ''" >> bench_data/postgresql.conf""")
-			self.__exec_command(
-				"""echo "listen_rdma_addresses = '{0}'" >> bench_data/postgresql.conf""".format(self.host))
-
-		self.__exec_command("""echo "shared_buffers = 8GB" >> bench_data/postgresql.conf""")
-		self.__exec_command("""echo "work_mem = 50MB" >> bench_data/postgresql.conf""")
-		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> bench_data/postgresql.conf""")
-
-		self.__exec_command("""echo "fsync = off" >> bench_data/postgresql.conf""")
-		self.__exec_command("""echo "synchronous_commit = off" >> bench_data/postgresql.conf""")
+		self.__exec_command("""echo "listen_addresses = '*'" >> bench_data/postgresql.auto.conf""")
+		self.__exec_command("""echo "listen_rdma_addresses = ''" >> bench_data/postgresql.auto.conf""")
 
 	def run(self):
-		self.__exec_command("pg_bin/bin/pg_ctl -w start -D bench_data")
+		self.__exec_command("pg_bin/bin/pg_ctl -w start -D repl_bench_data")
 		self.__exec_command("pg_bin/bin/createdb pgbench")
 
 	def stop(self):
-		self.__exec_command("pg_bin/bin/pg_ctl -w stop -D bench_data")
-		self.__exec_command("rm -rf bench_data")
+		self.__exec_command("pg_bin/bin/pg_ctl -w stop -D repl_bench_data")
+		self.__exec_command("rm -rf repl_bench_data")
 		self.client.close()
 
 	def __exec_command(self, cmd):
@@ -103,29 +130,27 @@ class Writer(object):
 		self.f.close()
 
 class Test(object):
-	def __init__(self, server, scale, clients, run_time, select_only):
-		self.server = server
-		self.scale = scale
+	def __init__(self, primary_server, standby_server, clients, run_time):
+		self.primary_server = primary_server
+		self.standby_server = standby_server
 		self.clients = clients
 		self.run_time = run_time
-		self.select_only = select_only
 
 	def run(self):
-		print("Initialize data directory...")
-		self.server.init()
-		print("Run database server...")
-		self.server.run()
+		print("Initialize primary server...")
+		self.primary_server.init()
+		print("Run primary database server...")
+		self.primary_server.run()
 
-		print("Initialize pgbench database...\n")
+		print("Initialize standby server...")
+		self.standby_server.init()
+		print("Run standby database server...")
+		self.standby_server.run()
 
-		with_rsocket = "--with-rsocket" if self.server.with_rsocket else ""
-		select_only = "--select-only" if self.select_only else ""
-
-		Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
-			self.server.host, with_rsocket, self.scale))
+		print("\n")
 
 		filename = "{0}_{1}_clients_{2}.csv".format(
-			"rsocket" if self.server.with_rsocket else "socket"
+			"rsocket" if self.primary_server.with_rsocket else "socket"
 			self.clients, datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"))
 
 		w = Writer(filename)
@@ -133,8 +158,9 @@ class Test(object):
 		for i in range(0, self.clients):
 			print("Run pgbench for {0} clients...".format(i + 1))
 
-			out = Shell("pg_bin/bin/pgbench -h {0} {1} {2} -c {3} -T {4} -v pgbench".format(
-				self.server.host, with_rsocket, select_only, i + 1, self.run_time))
+			out = Shell("pg_bin/bin/pgbench {0} -c {1} -T {2} -v pgbench".format(
+				"--with-rsocket" if self.primary_server.with_rsocket else "",
+				i + 1, self.run_time))
 			res = Result(out.stdout)
 
 			w.add_value(i + 1, res.tps, res.trans, res.avg_latency)
@@ -143,23 +169,32 @@ class Test(object):
 
 		w.close()
 
-		print("Stop database server. Remove data directory...")
-		self.server.stop()
+		print("Stop standby database server. Remove data directory...")
+		self.standby_server.stop()
+
+		print("Stop primary database server. Remove data directory...")
+		self.primary_server.stop()
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="rsocket benchmark tool",
 		add_help=False)
+
 	parser.add_argument("-?", "--help",
 		action="help",
 		help="Show this help message and exit")
-	parser.add_argument("-h", "--host",
+	parser.add_argument("--primary",
 		type=str,
-		help="Database server''s host name",
+		help="Primary database server''s host name",
 		required=True,
-		dest="host")
+		dest="primary_host")
+	parser.add_argument("--standby",
+		type=str,
+		help="Standby database server''s host name",
+		required=True,
+		dest="standby_host")
 	parser.add_argument("-u", "--user",
 		type=str,
-		help="User to connect through ssh and libpq",
+		help="User to connect through ssh",
 		required=True,
 		dest="user")
 	parser.add_argument("--password",
@@ -187,22 +222,21 @@ if __name__ == "__main__":
 		help="Maximum number of clients",
 		default=100,
 		dest="clients")
-	parser.add_argument("-S", "--select-only",
-		help="Run select-only script",
-		action="store_true",
-		default=False,
-		dest="select_only")
 
 	args = parser.parse_args()
 
 	# Run rsocket test
-	serv = Server(args.host, args.user, args.password, args.port, True)
-	test = Test(serv, args.scale, args.clients, args.time, args.select_only)
+	prim_serv = PrimaryServer(args.primary_host, args.scale, True)
+	standby_serv = StandbyServer(args.primary_host, args.standby_host,
+		args.user, args.password, args.port, True)
+	test = Test(prim_serv, standby_serv, args.clients, args.time)
 	test.run()
 
 	# Run socket test
-	serv = Server(args.host, args.user, args.password, args.port, False)
-	test = Test(serv, args.scale, args.clients, args.time, args.select_only)
+	prim_serv = PrimaryServer(args.primary_host, args.scale, False)
+	standby_serv = StandbyServer(args.primary_host, args.standby_host,
+		args.user, args.password, args.port, False)
+	test = Test(prim_serv, standby_serv, args.clients, args.time)
 	test.run()
 
 	print("Finished")
