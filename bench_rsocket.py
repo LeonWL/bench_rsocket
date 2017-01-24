@@ -37,6 +37,7 @@ class Server(object):
 		self.__exec_command("""echo "shared_buffers = 8GB" >> bench_data/postgresql.conf""")
 		self.__exec_command("""echo "work_mem = 50MB" >> bench_data/postgresql.conf""")
 		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> bench_data/postgresql.conf""")
+		self.__exec_command("""echo "max_wal_size = 8GB" >> bench_data/postgresql.conf""")
 
 		self.__exec_command("""echo "fsync = off" >> bench_data/postgresql.conf""")
 		self.__exec_command("""echo "synchronous_commit = off" >> bench_data/postgresql.conf""")
@@ -66,8 +67,7 @@ class Shell(object):
 	def run(self):
 		p = subprocess.Popen(self.cmd, shell=True,
 			stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
-		while p.poll() is None:
-			time.sleep(1)
+		p.wait()
 		if p.returncode != 0:
 			out, err = p.communicate()
 			print(err)
@@ -111,18 +111,8 @@ class Test(object):
 		self.select_only = select_only
 
 	def run(self):
-		print("Initialize data directory...")
-		self.server.init()
-		print("Run database server...")
-		self.server.run()
-
-		print("Initialize pgbench database...\n")
-
 		with_rsocket = "--with-rsocket" if self.server.with_rsocket else ""
 		select_only = "--select-only" if self.select_only else ""
-
-		Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
-			self.server.host, with_rsocket, self.scale))
 
 		filename = "{0}_{1}_clients_{2}.csv".format(
 			"rsocket" if self.server.with_rsocket else "socket"
@@ -131,6 +121,18 @@ class Test(object):
 		w = Writer(filename)
 
 		for i in range(0, self.clients):
+			if i != 0:
+				print("\n")
+
+			print("Initialize data directory...")
+			self.server.init()
+			print("Run database server...")
+			self.server.run()
+
+			print("Initialize pgbench database...")
+			Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
+				self.server.host, with_rsocket, self.scale))
+
 			print("Run pgbench for {0} clients...".format(i + 1))
 
 			out = Shell("pg_bin/bin/pgbench -h {0} {1} {2} -c {3} -T {4} -v pgbench".format(
@@ -138,13 +140,13 @@ class Test(object):
 			res = Result(out.stdout)
 
 			w.add_value(i + 1, res.tps, res.trans, res.avg_latency)
-			print("Test result: tps={0} trans={1} avg_latency={2}\n".format(
+			print("Test result: tps={0} trans={1} avg_latency={2}".format(
 				res.tps, res.trans, res.avg_latency))
 
-		w.close()
+			print("Stop database server. Remove data directory...")
+			self.server.stop()
 
-		print("Stop database server. Remove data directory...")
-		self.server.stop()
+		w.close()
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="rsocket benchmark tool",
