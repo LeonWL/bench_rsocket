@@ -20,8 +20,8 @@ def read_csv(csv_file):
 
 			# Clients
 			x.append(int(s[0]))
-			# TPS
-			y.append(int(s[1]))
+			# Latency
+			y.append(float(s[1]))
 
 	return x, y
 

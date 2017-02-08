@@ -30,17 +30,17 @@ class Server(object):
 
 		# Set configuration
 		if self.with_rsocket:
-			self.__exec_command("""echo "listen_addresses = ''" >> bench_data/postgresql.conf""")
+			self.__exec_command("""echo "listen_addresses = ''" >> bench_data/postgresql.auto.conf""")
 			self.__exec_command(
-				"""echo "listen_rdma_addresses = '{0}'" >> bench_data/postgresql.conf""".format(self.host))
+				"""echo "listen_rdma_addresses = '{0}'" >> bench_data/postgresql.auto.conf""".format(self.host))
 
-		self.__exec_command("""echo "shared_buffers = 8GB" >> bench_data/postgresql.conf""")
-		self.__exec_command("""echo "work_mem = 50MB" >> bench_data/postgresql.conf""")
-		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> bench_data/postgresql.conf""")
-		self.__exec_command("""echo "max_wal_size = 8GB" >> bench_data/postgresql.conf""")
+		self.__exec_command("""echo "shared_buffers = 8GB" >> bench_data/postgresql.auto.conf""")
+		self.__exec_command("""echo "work_mem = 50MB" >> bench_data/postgresql.auto.conf""")
+		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> bench_data/postgresql.auto.conf""")
+		self.__exec_command("""echo "max_wal_size = 8GB" >> bench_data/postgresql.auto.conf""")
 
-		self.__exec_command("""echo "fsync = off" >> bench_data/postgresql.conf""")
-		self.__exec_command("""echo "synchronous_commit = off" >> bench_data/postgresql.conf""")
+		self.__exec_command("""echo "fsync = off" >> bench_data/postgresql.auto.conf""")
+		self.__exec_command("""echo "synchronous_commit = off" >> bench_data/postgresql.auto.conf""")
 
 	def run(self):
 		self.__exec_command("pg_bin/bin/pg_ctl -w start -D bench_data")
@@ -115,7 +115,7 @@ class Test(object):
 		select_only = "--select-only" if self.select_only else ""
 
 		filename = "{0}_{1}_clients_{2}.csv".format(
-			"rsocket" if self.server.with_rsocket else "socket"
+			"rsocket" if self.server.with_rsocket else "socket",
 			self.clients, datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"))
 
 		w = Writer(filename)
