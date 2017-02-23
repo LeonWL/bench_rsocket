@@ -37,7 +37,7 @@ class Server(object):
 		self.__exec_command("""echo "shared_buffers = 8GB" >> bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "work_mem = 50MB" >> bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "max_wal_size = 8GB" >> bench_data/postgresql.auto.conf""")
+		self.__exec_command("""echo "max_wal_size = 16GB" >> bench_data/postgresql.auto.conf""")
 
 		self.__exec_command("""echo "fsync = off" >> bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "synchronous_commit = off" >> bench_data/postgresql.auto.conf""")
@@ -103,22 +103,20 @@ class Writer(object):
 		self.f.close()
 
 class Test(object):
-	def __init__(self, server, scale, clients, run_time, select_only):
+	def __init__(self, server, clients, run_time):
 		self.server = server
-		self.scale = scale
 		self.clients = clients
 		self.run_time = run_time
-		self.select_only = select_only
 
 	def run(self):
 		with_rsocket = "--with-rsocket" if self.server.with_rsocket else ""
-		select_only = "--select-only" if self.select_only else ""
 
 		filename = "{0}_{1}_clients_{2}.csv".format(
 			"rsocket" if self.server.with_rsocket else "socket",
 			self.clients, datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"))
 
 		w = Writer(filename)
+
 		print("Initialize data directory...")
 		self.server.init()
 		print("Run database server...")
@@ -128,17 +126,11 @@ class Test(object):
 			c = 1 if i == 0 else i
 			if i != 0:
 				print("\n")
-				# Wait 2 seconds
-				time.sleep(2)
-
-			print("Initialize pgbench database...")
-			Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
-				self.server.host, with_rsocket, self.scale))
 
 			print("Run pgbench for {0} clients...".format(c))
 
-			out = Shell("pg_bin/bin/pgbench -h {0} {1} {2} -c {3} -T {4} -v pgbench".format(
-				self.server.host, with_rsocket, select_only, c, self.run_time))
+			out = Shell("pg_bin/bin/pgbench -h {0} {1} -f select1.sql -c {2} -j {2} -T {3} pgbench".format(
+				self.server.host, with_rsocket, c, self.run_time))
 			res = Result(out.stdout)
 
 			w.add_value(c, res.tps, res.trans, res.avg_latency)
@@ -175,11 +167,6 @@ if __name__ == "__main__":
 		help="Ssh port",
 		default=22,
 		dest="port")
-	parser.add_argument("-s", "--scale",
-		type=int,
-		help="Scale of tables",
-		default=100,
-		dest="scale")
 	parser.add_argument("-t", "--time",
 		type=int,
 		help="Time for tests",
@@ -190,22 +177,17 @@ if __name__ == "__main__":
 		help="Maximum number of clients",
 		default=100,
 		dest="clients")
-	parser.add_argument("-S", "--select-only",
-		help="Run select-only script",
-		action="store_true",
-		default=False,
-		dest="select_only")
 
 	args = parser.parse_args()
 
 	# Run rsocket test
 	serv = Server(args.host, args.user, args.password, args.port, True)
-	test = Test(serv, args.scale, args.clients, args.time, args.select_only)
+	test = Test(serv, args.clients, args.time)
 	test.run()
 
 	# Run socket test
 	serv = Server(args.host, args.user, args.password, args.port, False)
-	test = Test(serv, args.scale, args.clients, args.time, args.select_only)
+	test = Test(serv, args.clients, args.time)
 	test.run()
 
 	print("Finished")

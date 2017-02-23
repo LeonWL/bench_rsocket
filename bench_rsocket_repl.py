@@ -36,13 +36,13 @@ class PrimaryServer(object):
 		self.__exec_command("""echo "shared_buffers = 8GB" >> repl_bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "work_mem = 50MB" >> repl_bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> repl_bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "max_wal_size = 8GB" >> repl_bench_data/postgresql.auto.conf""")
+		self.__exec_command("""echo "max_wal_size = 16GB" >> repl_bench_data/postgresql.auto.conf""")
 
 		self.__exec_command("""echo "fsync = off" >> repl_bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "synchronous_commit = remote_write" >> repl_bench_data/postgresql.auto.conf""")
 
 	def run(self):
-		self.__exec_command("pg_bin/bin/pg_ctl -w start -D repl_bench_data")
+		self.__exec_command("pg_bin/bin/pg_ctl -w start -D repl_bench_data -l repl_bench_data/postgresql.log")
 		self.__exec_command("pg_bin/bin/createdb pgbench")
 		self.__exec_command("pg_bin/bin/pgbench -s {0} -i pgbench".format(self.scale))
 		self.__exec_command("pg_bin/bin/pg_ctl -w stop -D repl_bench_data")
@@ -52,10 +52,10 @@ class PrimaryServer(object):
 		self.__exec_command("""echo "synchronous_standby_names = '*'" >> repl_bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "hot_standby = on" >> repl_bench_data/postgresql.auto.conf""")
 
-		self.__exec_command("""echo "local   replication     artur               trust" >> repl_bench_data/pg_hba.conf""")
-		self.__exec_command("""echo "host    replication     artur   0.0.0.0/0   trust" >> repl_bench_data/pg_hba.conf""")
+		self.__exec_command("""echo "local   replication     postgres               trust" >> repl_bench_data/pg_hba.conf""")
+		self.__exec_command("""echo "host    replication     postgres   0.0.0.0/0   trust" >> repl_bench_data/pg_hba.conf""")
 
-		self.__exec_command("pg_bin/bin/pg_ctl -w start -D repl_bench_data")
+		self.__exec_command("pg_bin/bin/pg_ctl -w start -D repl_bench_data -l repl_bench_data/postgresql.log")
 
 	def stop(self):
 		self.__exec_command("pg_bin/bin/pg_ctl -w stop -D repl_bench_data")
@@ -70,25 +70,43 @@ class PrimaryServer(object):
 				stderr.channel.recv_exit_status()))
 
 class StandbyServer(object):
-	def __init__(self, primary_host, with_rsocket):
+	def __init__(self, primary_host, standby_host, user, password, port, with_rsocket):
 		self.primary_host = primary_host
+		self.standby_host = standby_host
+		self.user = user
+		self.password = password
+		self.port = port
 		self.with_rsocket = with_rsocket
 
 	def init(self):
-		Shell(("pg_bin/bin/pg_basebackup -D repl_bench_data "
+		client = paramiko.SSHClient()
+		client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+		client.connect(hostname=self.standby_host, username=self.user,
+			password=self.password, port=self.port)
+		self.client = client
+
+		self.__exec_command(("pg_bin/bin/pg_basebackup -D repl_bench_data "
 			"-x -R -h {0} {1}").format(self.primary_host,
 			"--with-rsocket" if self.with_rsocket else ""))
 
-		with open("repl_bench_data/postgresql.auto.conf", "a") as f:
-			f.write("listen_addresses = '*'\n")
-			f.write("listen_rdma_addresses = ''")
+		# Set configuration
+		self.__exec_command("""echo "listen_addresses = '*'" >> repl_bench_data/postgresql.auto.conf""")
+		self.__exec_command("""echo "listen_rdma_addresses = ''" >> repl_bench_data/postgresql.auto.conf""")
 
 	def run(self):
-		Shell("pg_bin/bin/pg_ctl -w start -D repl_bench_data")
+		self.__exec_command("pg_bin/bin/pg_ctl -w start -D repl_bench_data -l repl_bench_data/postgresql.log")
 
 	def stop(self):
-		Shell("pg_bin/bin/pg_ctl -w stop -D repl_bench_data")
-		Shell("rm -rf repl_bench_data")
+		self.__exec_command("pg_bin/bin/pg_ctl -w stop -D repl_bench_data")
+		self.__exec_command("rm -rf repl_bench_data")
+		self.client.close()
+
+	def __exec_command(self, cmd):
+		stdin, stdout, stderr = self.client.exec_command(cmd)
+		if stderr.channel.recv_exit_status() != 0:
+			print(stderr.read())
+			sys.exit("Command '{0}' failed with code: {1}".format(cmd,
+				stderr.channel.recv_exit_status()))
 
 class Shell(object):
 	def __init__(self, cmd, wait_time = 0):
@@ -153,7 +171,8 @@ class Test(object):
 
 		w = Writer(filename)
 
-		for i in range(0, self.clients):
+		for i in range(0, self.clients + 1, 4):
+			c = 1 if i == 0 else i
 			if i != 0:
 				print("\n")
 
@@ -167,15 +186,17 @@ class Test(object):
 			print("Run standby database server...")
 			self.standby_server.run()
 
-			print("Run pgbench for {0} clients...".format(i + 1))
+			# Delays for 1 second
+			time.sleep(1)
+			print("Run pgbench for {0} clients...".format(c))
 
-			out = Shell("pg_bin/bin/pgbench -h {0} {1} -c {2} -T {3} -v pgbench".format(
+			out = Shell("pg_bin/bin/pgbench -h {0} {1} -c {2} -j {2} -T {3} -v pgbench".format(
 				self.primary_server.host,
 				"--with-rsocket" if self.primary_server.with_rsocket else "",
-				i + 1, self.run_time))
+				c, self.run_time))
 			res = Result(out.stdout)
 
-			w.add_value(i + 1, res.tps, res.trans, res.avg_latency)
+			w.add_value(c, res.tps, res.trans, res.avg_latency)
 			print("Test result: tps={0} trans={1} avg_latency={2}".format(
 				res.tps, res.trans, res.avg_latency))
 
@@ -199,6 +220,11 @@ if __name__ == "__main__":
 		help="Primary database server''s host name",
 		required=True,
 		dest="primary_host")
+	parser.add_argument("--standby",
+		type=str,
+		help="Standby database server''s host name",
+		required=True,
+		dest="standby_host")
 	parser.add_argument("-u", "--user",
 		type=str,
 		help="User to connect through ssh",
@@ -235,14 +261,16 @@ if __name__ == "__main__":
 	# Run rsocket test
 	prim_serv = PrimaryServer(args.primary_host, args.scale,
 		args.user, args.password, args.port, True)
-	standby_serv = StandbyServer(args.primary_host, True)
+	standby_serv = StandbyServer(args.primary_host, args.standby_host,
+		args.user, args.password, args.port, True)
 	test = Test(prim_serv, standby_serv, args.clients, args.time)
 	test.run()
 
 	# Run socket test
 	prim_serv = PrimaryServer(args.primary_host, args.scale,
 		args.user, args.password, args.port, False)
-	standby_serv = StandbyServer(args.primary_host, False)
+	standby_serv = StandbyServer(args.primary_host, args.standby_host,
+		args.user, args.password, args.port, False)
 	test = Test(prim_serv, standby_serv, args.clients, args.time)
 	test.run()
 
