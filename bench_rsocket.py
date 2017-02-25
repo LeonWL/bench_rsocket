@@ -124,16 +124,16 @@ class Test(object):
 		print("Run database server...")
 		self.server.run()
 
+		print("Initialize pgbench database...")
+		Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
+			self.server.host, with_rsocket, self.scale))
+
 		for i in range(0, self.clients + 1, 4):
 			c = 1 if i == 0 else i
 			if i != 0:
 				print("\n")
 				# Wait 2 seconds
 				time.sleep(2)
-
-			print("Initialize pgbench database...")
-			Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
-				self.server.host, with_rsocket, self.scale))
 
 			print("Run pgbench for {0} clients...".format(c))
 

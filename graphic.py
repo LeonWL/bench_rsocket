@@ -4,7 +4,7 @@
 import argparse
 import matplotlib.pyplot as plt
 
-def read_csv(csv_file):
+def read_csv(csv_file, mode):
 	x = []
 	y = []
 	i = 0
@@ -20,22 +20,29 @@ def read_csv(csv_file):
 
 			# Clients
 			x.append(int(s[0]))
+			# TPS
+			if mode == "tps":
+				y.append(float(s[1]))
 			# Latency
-			y.append(float(s[1]))
+			else:
+				y.append(float(s[3]))
 
 	return x, y
 
-def make_graphic(rsocket_csv, socket_csv):
-	rsocket_x, rsocket_y = read_csv(rsocket_csv)
-	socket_x, socket_y = read_csv(socket_csv)
+def make_graphic(rsocket_csv, socket_csv, mode):
+	rsocket_x, rsocket_y = read_csv(rsocket_csv, mode)
+	socket_x, socket_y = read_csv(socket_csv, mode)
 
 	f, ax = plt.subplots()
 	ax.plot(rsocket_x, rsocket_y, color="blue", marker="s", label="rsocket")
 	ax.plot(socket_x, socket_y, color="red", marker="s", label="socket")
 
-	ax.set_title("pgbench, scale factor 100, time 30 minute\nshared_buffers = 8GB")
+	ax.set_title("pgbench, -s 350 -c 80 -T 120")
 	ax.set_xlabel("Number of clients")
-	ax.set_ylabel("TPS")
+	if mode == "tps":
+		ax.set_ylabel("TPS")
+	else:
+		ax.set_ylabel("Latency, ms")
 	# Lower left corner
 	ax.legend(loc=4)
 	ax.grid(True)
@@ -54,6 +61,12 @@ if __name__ == '__main__':
 		help="socket benchmark result",
 		required=True,
 		dest="socket_csv")
+	parser.add_argument("-m", "--mode",
+		type=str,
+		help="TPS or Latency visualization",
+		default="tps",
+		choices=['tps', 'latency'],
+		dest="mode")
 
 	args = parser.parse_args()
-	make_graphic(args.rsocket_csv, args.socket_csv)
+	make_graphic(args.rsocket_csv, args.socket_csv, args.mode)

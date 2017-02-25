@@ -171,20 +171,20 @@ class Test(object):
 
 		w = Writer(filename)
 
+		print("Initialize primary server...")
+		self.primary_server.init()
+		print("Run primary database server...")
+		self.primary_server.run()
+
+		print("Initialize standby server...")
+		self.standby_server.init()
+		print("Run standby database server...")
+		self.standby_server.run()
+
 		for i in range(0, self.clients + 1, 4):
 			c = 1 if i == 0 else i
 			if i != 0:
 				print("\n")
-
-			print("Initialize primary server...")
-			self.primary_server.init()
-			print("Run primary database server...")
-			self.primary_server.run()
-
-			print("Initialize standby server...")
-			self.standby_server.init()
-			print("Run standby database server...")
-			self.standby_server.run()
 
 			# Delays for 1 second
 			time.sleep(1)
@@ -200,11 +200,11 @@ class Test(object):
 			print("Test result: tps={0} trans={1} avg_latency={2}".format(
 				res.tps, res.trans, res.avg_latency))
 
-			print("Stop standby database server. Remove data directory...")
-			self.standby_server.stop()
+		print("Stop standby database server. Remove data directory...")
+		self.standby_server.stop()
 
-			print("Stop primary database server. Remove data directory...")
-			self.primary_server.stop()
+		print("Stop primary database server. Remove data directory...")
+		self.primary_server.stop()
 
 		w.close()
 
