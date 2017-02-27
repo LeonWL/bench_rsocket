@@ -186,8 +186,6 @@ class Test(object):
 			if i != 0:
 				print("\n")
 
-			# Delays for 1 second
-			time.sleep(1)
 			print("Run pgbench for {0} clients...".format(c))
 
 			out = Shell("pg_bin/bin/pgbench -h {0} {1} -c {2} -j {2} -T {3} -v pgbench".format(

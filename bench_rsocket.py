@@ -37,7 +37,7 @@ class Server(object):
 		self.__exec_command("""echo "shared_buffers = 8GB" >> bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "work_mem = 50MB" >> bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "max_wal_size = 8GB" >> bench_data/postgresql.auto.conf""")
+		self.__exec_command("""echo "max_wal_size = 16GB" >> bench_data/postgresql.auto.conf""")
 
 		self.__exec_command("""echo "fsync = off" >> bench_data/postgresql.auto.conf""")
 		self.__exec_command("""echo "synchronous_commit = off" >> bench_data/postgresql.auto.conf""")
