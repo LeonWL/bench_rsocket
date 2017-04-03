@@ -12,7 +12,8 @@ import tempfile
 import time
 
 class PrimaryServer(object):
-	def __init__(self, host, scale, user, password, port, with_rsocket):
+	def __init__(self, bin_path, host, scale, user, password, port, with_rsocket):
+		self.bin_path = bin_path
 		self.host = host
 		self.scale = scale
 		self.user = user
@@ -27,39 +28,46 @@ class PrimaryServer(object):
 			password=self.password, port=self.port)
 		self.client = client
 
-		self.__exec_command("pg_bin/bin/initdb -D repl_bench_data")
+		self.__exec_command("{0}/bin/initdb -D {0}/repl_bench_data".format(self.bin_path))
 
 		# Set configuration
 		if self.with_rsocket:
-			self.__exec_command("""echo "listen_addresses = ''" >> repl_bench_data/postgresql.auto.conf""")
-			self.__exec_command("""echo "listen_rdma_addresses = '{0}'" >> repl_bench_data/postgresql.auto.conf""".format(self.host))
-		self.__exec_command("""echo "shared_buffers = 8GB" >> repl_bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "work_mem = 50MB" >> repl_bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> repl_bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "max_wal_size = 16GB" >> repl_bench_data/postgresql.auto.conf""")
+			self.__append_conf("listen_addresses", "")
+			self.__append_conf("listen_rdma_addresses", self.host)
 
-		self.__exec_command("""echo "fsync = off" >> repl_bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "synchronous_commit = remote_write" >> repl_bench_data/postgresql.auto.conf""")
+		self.__append_conf("shared_buffers", "8GB")
+		self.__append_conf("work_mem", "50MB")
+		self.__append_conf("maintenance_work_mem", "2GB")
+		self.__append_conf("max_wal_size", "16GB")
+
+		# fsync is 'on'
+		# self.__append_conf("fsync", "off")
+		# synchronous_commit is 'on'
+		# self.__append_conf("synchronous_commit", "remote_apply")
 
 	def run(self):
-		self.__exec_command("pg_bin/bin/pg_ctl -w start -D repl_bench_data -l repl_bench_data/postgresql.log")
-		self.__exec_command("pg_bin/bin/createdb pgbench")
-		self.__exec_command("pg_bin/bin/pgbench -s {0} -i pgbench".format(self.scale))
-		self.__exec_command("pg_bin/bin/pg_ctl -w stop -D repl_bench_data")
+		self.__exec_command("{0}/bin/pg_ctl -w start -D {0}/repl_bench_data -l {0}/repl_bench_data/postgresql.log".format(
+			self.bin_path))
+		self.__exec_command("{0}/bin/createdb pgbench".format(self.bin_path))
+		self.__exec_command("{0}/bin/pgbench -s {1} -i pgbench".format(self.bin_path, self.scale))
+		self.__exec_command("{0}/bin/pg_ctl -w stop -D {0}/repl_bench_data".format(self.bin_path))
 
-		self.__exec_command("""echo "wal_level = hot_standby" >> repl_bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "max_wal_senders = 2" >> repl_bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "synchronous_standby_names = '*'" >> repl_bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "hot_standby = on" >> repl_bench_data/postgresql.auto.conf""")
+		self.__append_conf("wal_level", "hot_standby")
+		self.__append_conf("max_wal_senders", "2")
+		self.__append_conf("synchronous_standby_names", "*")
+		self.__append_conf("hot_standby", "on")
 
-		self.__exec_command("""echo "local   replication     postgres               trust" >> repl_bench_data/pg_hba.conf""")
-		self.__exec_command("""echo "host    replication     postgres   0.0.0.0/0   trust" >> repl_bench_data/pg_hba.conf""")
+		self.__exec_command("""echo "local   replication     postgres               trust" >> {0}/repl_bench_data/pg_hba.conf""".format(
+			self.bin_path))
+		self.__exec_command("""echo "host    replication     postgres   0.0.0.0/0   trust" >> {0}/repl_bench_data/pg_hba.conf""".format(
+			self.bin_path))
 
-		self.__exec_command("pg_bin/bin/pg_ctl -w start -D repl_bench_data -l repl_bench_data/postgresql.log")
+		self.__exec_command("{0}/bin/pg_ctl -w start -D {0}/repl_bench_data -l {0}/repl_bench_data/postgresql.log".format(
+			self.bin_path))
 
 	def stop(self):
-		self.__exec_command("pg_bin/bin/pg_ctl -w stop -D repl_bench_data")
-		self.__exec_command("rm -rf repl_bench_data")
+		self.__exec_command("{0}/bin/pg_ctl -w stop -D {0}/repl_bench_data".format(self.bin_path))
+		self.__exec_command("rm -rf {0}/repl_bench_data".format(self.bin_path))
 		self.client.close()
 
 	def __exec_command(self, cmd):
@@ -69,8 +77,13 @@ class PrimaryServer(object):
 			sys.exit("Command '{0}' failed with code: {1}".format(cmd,
 				stderr.channel.recv_exit_status()))
 
+	def __append_conf(self, name, value):
+		self.__exec_command("""echo "{0} = '{1}'" >> {2}/repl_bench_data/postgresql.auto.conf""".format(
+			name, value, self.bin_path))
+
 class StandbyServer(object):
-	def __init__(self, primary_host, standby_host, user, password, port, with_rsocket):
+	def __init__(self, bin_path, primary_host, standby_host, user, password, port, with_rsocket):
+		self.bin_path = bin_path
 		self.primary_host = primary_host
 		self.standby_host = standby_host
 		self.user = user
@@ -85,20 +98,21 @@ class StandbyServer(object):
 			password=self.password, port=self.port)
 		self.client = client
 
-		self.__exec_command(("pg_bin/bin/pg_basebackup -D repl_bench_data "
-			"-x -R -h {0} {1}").format(self.primary_host,
+		self.__exec_command(("{0}/bin/pg_basebackup -D {0}/repl_bench_data "
+			"-x -R -h {1} {2}").format(self.bin_path, self.primary_host,
 			"--with-rsocket" if self.with_rsocket else ""))
 
 		# Set configuration
-		self.__exec_command("""echo "listen_addresses = '*'" >> repl_bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "listen_rdma_addresses = ''" >> repl_bench_data/postgresql.auto.conf""")
+		self.__append_conf("listen_addresses", "*")
+		self.__append_conf("listen_rdma_addresses", "")
 
 	def run(self):
-		self.__exec_command("pg_bin/bin/pg_ctl -w start -D repl_bench_data -l repl_bench_data/postgresql.log")
+		self.__exec_command("{0}/bin/pg_ctl -w start -D {0}/repl_bench_data -l {0}/repl_bench_data/postgresql.log".format(
+			self.bin_path))
 
 	def stop(self):
-		self.__exec_command("pg_bin/bin/pg_ctl -w stop -D repl_bench_data")
-		self.__exec_command("rm -rf repl_bench_data")
+		self.__exec_command("{0}/bin/pg_ctl -w stop -D {0}/repl_bench_data".format(self.bin_path))
+		self.__exec_command("rm -rf {0}/repl_bench_data".format(self.bin_path))
 		self.client.close()
 
 	def __exec_command(self, cmd):
@@ -107,6 +121,10 @@ class StandbyServer(object):
 			print(stderr.read())
 			sys.exit("Command '{0}' failed with code: {1}".format(cmd,
 				stderr.channel.recv_exit_status()))
+
+	def __append_conf(self, name, value):
+		self.__exec_command("""echo "{0} = '{1}'" >> {2}/repl_bench_data/postgresql.auto.conf""".format(
+			name, value, self.bin_path))
 
 class Shell(object):
 	def __init__(self, cmd, wait_time = 0):
@@ -188,8 +206,8 @@ class Test(object):
 
 			print("Run pgbench for {0} clients...".format(c))
 
-			out = Shell("pg_bin/bin/pgbench -h {0} {1} -c {2} -j {2} -T {3} -v pgbench".format(
-				self.primary_server.host,
+			out = Shell("{0}/bin/pgbench -h {1} {2} -c {3} -j {3} -T {4} -v pgbench".format(
+				self.primary_server.bin_path, self.primary_server.host,
 				"--with-rsocket" if self.primary_server.with_rsocket else "",
 				c, self.run_time))
 			res = Result(out.stdout)
@@ -213,6 +231,11 @@ if __name__ == "__main__":
 	parser.add_argument("-?", "--help",
 		action="help",
 		help="Show this help message and exit")
+	parser.add_argument("-b", "--bin-path",
+		type=str,
+		help="PostgreSQL binaries path",
+		required=True,
+		dest="bin_path")
 	parser.add_argument("--primary",
 		type=str,
 		help="Primary database server''s host name",
@@ -257,17 +280,17 @@ if __name__ == "__main__":
 	args = parser.parse_args()
 
 	# Run rsocket test
-	prim_serv = PrimaryServer(args.primary_host, args.scale,
+	prim_serv = PrimaryServer(args.bin_path, args.primary_host, args.scale,
 		args.user, args.password, args.port, True)
-	standby_serv = StandbyServer(args.primary_host, args.standby_host,
+	standby_serv = StandbyServer(args.bin_path, args.primary_host, args.standby_host,
 		args.user, args.password, args.port, True)
 	test = Test(prim_serv, standby_serv, args.clients, args.time)
 	test.run()
 
 	# Run socket test
-	prim_serv = PrimaryServer(args.primary_host, args.scale,
+	prim_serv = PrimaryServer(args.bin_path, args.primary_host, args.scale,
 		args.user, args.password, args.port, False)
-	standby_serv = StandbyServer(args.primary_host, args.standby_host,
+	standby_serv = StandbyServer(args.bin_path, args.primary_host, args.standby_host,
 		args.user, args.password, args.port, False)
 	test = Test(prim_serv, standby_serv, args.clients, args.time)
 	test.run()

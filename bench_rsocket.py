@@ -12,7 +12,8 @@ import sys
 import time
 
 class Server(object):
-	def __init__(self, host, user, password, port, with_rsocket):
+	def __init__(self, bin_path, host, user, password, port, with_rsocket):
+		self.bin_path = bin_path
 		self.host = host
 		self.user = user
 		self.password = password
@@ -26,29 +27,34 @@ class Server(object):
 			password=self.password, port=self.port)
 		self.client = client
 
-		self.__exec_command("pg_bin/bin/initdb -D bench_data")
+		self.__exec_command("{0}/bin/initdb -D {0}/bench_data".format(self.bin_path))
 
 		# Set configuration
 		if self.with_rsocket:
-			self.__exec_command("""echo "listen_addresses = ''" >> bench_data/postgresql.auto.conf""")
-			self.__exec_command(
-				"""echo "listen_rdma_addresses = '{0}'" >> bench_data/postgresql.auto.conf""".format(self.host))
+			self.__append_conf("listen_addresses", "")
+			self.__append_conf("listen_rdma_addresses", self.host)
 
-		self.__exec_command("""echo "shared_buffers = 8GB" >> bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "work_mem = 50MB" >> bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "maintenance_work_mem = 2GB" >> bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "max_wal_size = 16GB" >> bench_data/postgresql.auto.conf""")
+		self.__append_conf("shared_buffers", "8GB")
+		self.__append_conf("work_mem", "50MB")
+		self.__append_conf("maintenance_work_mem", "2GB")
+		self.__append_conf("max_wal_size", "16GB")
 
-		self.__exec_command("""echo "fsync = off" >> bench_data/postgresql.auto.conf""")
-		self.__exec_command("""echo "synchronous_commit = off" >> bench_data/postgresql.auto.conf""")
+		# fsync is 'on'
+		# self.__append_conf("fsync", "off")
+		# synchronous_commit is 'on'
+		# self.__append_conf("synchronous_commit", "off")
+
+		self.__exec_command("""echo "host    all     all   0.0.0.0/0   trust" >> {0}/bench_data/pg_hba.conf""".format(
+			self.bin_path))
 
 	def run(self):
-		self.__exec_command("pg_bin/bin/pg_ctl -w start -D bench_data -l bench_data/postgresql.log")
-		self.__exec_command("pg_bin/bin/createdb pgbench")
+		self.__exec_command("{0}/bin/pg_ctl -w start -D {0}/bench_data -l {0}/bench_data/postgresql.log".format(
+			self.bin_path))
+		self.__exec_command("{0}/bin/createdb pgbench".format(self.bin_path))
 
 	def stop(self):
-		self.__exec_command("pg_bin/bin/pg_ctl -w stop -D bench_data")
-		self.__exec_command("rm -rf bench_data")
+		self.__exec_command("{0}/bin/pg_ctl -w stop -D {0}/bench_data".format(self.bin_path))
+		self.__exec_command("rm -rf {0}/bench_data".format(self.bin_path))
 		self.client.close()
 
 	def __exec_command(self, cmd):
@@ -57,6 +63,10 @@ class Server(object):
 			print(stderr.read())
 			sys.exit("Command '{0}' failed with code: {1}".format(cmd,
 				stderr.channel.recv_exit_status()))
+
+	def __append_conf(self, name, value):
+		self.__exec_command("""echo "{0} = '{1}'" >> {2}/bench_data/postgresql.auto.conf""".format(
+			name, value, self.bin_path))
 
 class Shell(object):
 	def __init__(self, cmd, wait_time = 0):
@@ -125,8 +135,8 @@ class Test(object):
 		self.server.run()
 
 		print("Initialize pgbench database...")
-		Shell("pg_bin/bin/pgbench -h {0} {1} -s {2} -i pgbench".format(
-			self.server.host, with_rsocket, self.scale))
+		Shell("{0}/bin/pgbench -h {1} {2} -s {3} -i pgbench".format(
+			self.server.bin_path, self.server.host, with_rsocket, self.scale))
 
 		for i in range(0, self.clients + 1, 4):
 			c = 1 if i == 0 else i
@@ -137,8 +147,8 @@ class Test(object):
 
 			print("Run pgbench for {0} clients...".format(c))
 
-			out = Shell("pg_bin/bin/pgbench -h {0} {1} {2} -c {3} -T {4} -v pgbench".format(
-				self.server.host, with_rsocket, select_only, c, self.run_time))
+			out = Shell("{0}/bin/pgbench -h {1} {2} {3} -c {4} -j {4} -T {5} -v pgbench".format(
+				self.server.bin_path, self.server.host, with_rsocket, select_only, c, self.run_time))
 			res = Result(out.stdout)
 
 			w.add_value(c, res.tps, res.trans, res.avg_latency)
@@ -155,6 +165,11 @@ if __name__ == "__main__":
 	parser.add_argument("-?", "--help",
 		action="help",
 		help="Show this help message and exit")
+	parser.add_argument("-b", "--bin-path",
+		type=str,
+		help="PostgreSQL binaries path",
+		required=True,
+		dest="bin_path")
 	parser.add_argument("-h", "--host",
 		type=str,
 		help="Database server''s host name",
@@ -199,12 +214,12 @@ if __name__ == "__main__":
 	args = parser.parse_args()
 
 	# Run rsocket test
-	serv = Server(args.host, args.user, args.password, args.port, True)
+	serv = Server(args.bin_path, args.host, args.user, args.password, args.port, True)
 	test = Test(serv, args.scale, args.clients, args.time, args.select_only)
 	test.run()
 
 	# Run socket test
-	serv = Server(args.host, args.user, args.password, args.port, False)
+	serv = Server(args.bin_path, args.host, args.user, args.password, args.port, False)
 	test = Test(serv, args.scale, args.clients, args.time, args.select_only)
 	test.run()
 
