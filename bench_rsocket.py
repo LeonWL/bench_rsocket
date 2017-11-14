@@ -33,27 +33,30 @@ class Server(object):
 		if self.with_rsocket:
 			self.__append_conf("listen_addresses", "")
 			self.__append_conf("listen_rdma_addresses", self.host)
+		else:
+			self.__append_conf("listen_addresses", self.host)
 
+		self.__append_conf("port", "5555")
 		self.__append_conf("shared_buffers", "8GB")
 		self.__append_conf("work_mem", "50MB")
 		self.__append_conf("maintenance_work_mem", "2GB")
 		self.__append_conf("max_wal_size", "16GB")
 
 		# fsync is 'on'
-		# self.__append_conf("fsync", "off")
+		self.__append_conf("fsync", "off")
 		# synchronous_commit is 'on'
-		# self.__append_conf("synchronous_commit", "off")
+		self.__append_conf("synchronous_commit", "off")
 
 		self.__exec_command("""echo "host    all     all   0.0.0.0/0   trust" >> {0}/bench_data/pg_hba.conf""".format(
 			self.bin_path))
 
 	def run(self):
-		self.__exec_command("{0}/bin/pg_ctl -w start -D {0}/bench_data -l {0}/bench_data/postgresql.log".format(
+		self.__exec_command('{0}/bin/pg_ctl -w start -D {0}/bench_data -l {0}/bench_data/postgresql.log'.format(
 			self.bin_path))
-		self.__exec_command("{0}/bin/createdb pgbench".format(self.bin_path))
+		self.__exec_command("{0}/bin/createdb pgbench -p 5555".format(self.bin_path))
 
 	def stop(self):
-		self.__exec_command("{0}/bin/pg_ctl -w stop -D {0}/bench_data".format(self.bin_path))
+		self.__exec_command('{0}/bin/pg_ctl -w stop -D {0}/bench_data'.format(self.bin_path))
 		self.__exec_command("rm -rf {0}/bench_data".format(self.bin_path))
 		self.client.close()
 
@@ -69,14 +72,18 @@ class Server(object):
 			name, value, self.bin_path))
 
 class Shell(object):
-	def __init__(self, cmd, wait_time = 0):
+	def __init__(self, cmd, with_rsocket, wait_time = 0):
 		self.cmd = cmd
 		self.stdout = None
+		self.with_rsocket = with_rsocket
 		self.run()
 
 	def run(self):
+		p_env = os.environ.copy()
+		if self.with_rsocket:
+			p_env["WITH_RSOCKET"] = "true"
 		p = subprocess.Popen(self.cmd, shell=True,
-			stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True)
+			stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True, env=p_env)
 		p.wait()
 		if p.returncode != 0:
 			out, err = p.communicate()
@@ -121,7 +128,6 @@ class Test(object):
 		self.select_only = select_only
 
 	def run(self):
-		with_rsocket = "--with-rsocket" if self.server.with_rsocket else ""
 		select_only = "--select-only" if self.select_only else ""
 
 		filename = "{0}_{1}_clients_{2}.csv".format(
@@ -135,8 +141,9 @@ class Test(object):
 		self.server.run()
 
 		print("Initialize pgbench database...")
-		Shell("{0}/bin/pgbench -h {1} {2} -s {3} -i pgbench".format(
-			self.server.bin_path, self.server.host, with_rsocket, self.scale))
+		Shell("{0}/bin/pgbench -h {1} -p 5555 -s {2} -i pgbench".format(
+			self.server.bin_path, self.server.host, self.scale),
+			self.server.with_rsocket)
 
 		for i in range(0, self.clients + 1, 4):
 			c = 1 if i == 0 else i
@@ -147,8 +154,9 @@ class Test(object):
 
 			print("Run pgbench for {0} clients...".format(c))
 
-			out = Shell("{0}/bin/pgbench -h {1} {2} {3} -c {4} -j {4} -T {5} -v pgbench".format(
-				self.server.bin_path, self.server.host, with_rsocket, select_only, c, self.run_time))
+			out = Shell("{0}/bin/pgbench -h {1} -p 5555 {2} -c {3} -j {3} -T {4} -v pgbench".format(
+				self.server.bin_path, self.server.host, select_only, c, self.run_time),
+				self.server.with_rsocket)
 			res = Result(out.stdout)
 
 			w.add_value(c, res.tps, res.trans, res.avg_latency)

@@ -5,6 +5,7 @@ import argparse
 import csv
 import datetime
 import paramiko
+import os
 import re
 import sys
 import subprocess
@@ -34,22 +35,23 @@ class PrimaryServer(object):
 		if self.with_rsocket:
 			self.__append_conf("listen_addresses", "")
 			self.__append_conf("listen_rdma_addresses", self.host)
+		else:
+			self.__append_conf("listen_addresses", self.host)
 
 		self.__append_conf("shared_buffers", "8GB")
 		self.__append_conf("work_mem", "50MB")
 		self.__append_conf("maintenance_work_mem", "2GB")
 		self.__append_conf("max_wal_size", "16GB")
+		self.__append_conf("port", "5555")
 
-		# fsync is 'on'
-		# self.__append_conf("fsync", "off")
-		# synchronous_commit is 'on'
-		# self.__append_conf("synchronous_commit", "remote_apply")
+		self.__append_conf("fsync", "off")
+		self.__append_conf("synchronous_commit", "remote_write")
 
 	def run(self):
 		self.__exec_command("{0}/bin/pg_ctl -w start -D {0}/repl_bench_data -l {0}/repl_bench_data/postgresql.log".format(
 			self.bin_path))
-		self.__exec_command("{0}/bin/createdb pgbench".format(self.bin_path))
-		self.__exec_command("{0}/bin/pgbench -s {1} -i pgbench".format(self.bin_path, self.scale))
+		self.__exec_command("{0}/bin/createdb pgbench -p 5555".format(self.bin_path))
+		self.__exec_command("{0}/bin/pgbench -s {1} -i -p 5555 pgbench".format(self.bin_path, self.scale))
 		self.__exec_command("{0}/bin/pg_ctl -w stop -D {0}/repl_bench_data".format(self.bin_path))
 
 		self.__append_conf("wal_level", "hot_standby")
@@ -57,21 +59,26 @@ class PrimaryServer(object):
 		self.__append_conf("synchronous_standby_names", "*")
 		self.__append_conf("hot_standby", "on")
 
-		self.__exec_command("""echo "local   replication     postgres               trust" >> {0}/repl_bench_data/pg_hba.conf""".format(
+		self.__exec_command("""echo "local   replication     all               trust" >> {0}/repl_bench_data/pg_hba.conf""".format(
 			self.bin_path))
-		self.__exec_command("""echo "host    replication     postgres   0.0.0.0/0   trust" >> {0}/repl_bench_data/pg_hba.conf""".format(
+		self.__exec_command("""echo "host    replication     all   0.0.0.0/0   trust" >> {0}/repl_bench_data/pg_hba.conf""".format(
+			self.bin_path))
+		self.__exec_command("""echo "host    all     all   0.0.0.0/0   trust" >> {0}/repl_bench_data/pg_hba.conf""".format(
 			self.bin_path))
 
+		p_env = os.environ.copy()
+		p_env.pop("VMA_SELECT_POLL", None)
+
 		self.__exec_command("{0}/bin/pg_ctl -w start -D {0}/repl_bench_data -l {0}/repl_bench_data/postgresql.log".format(
-			self.bin_path))
+			self.bin_path), p_env)
 
 	def stop(self):
 		self.__exec_command("{0}/bin/pg_ctl -w stop -D {0}/repl_bench_data".format(self.bin_path))
 		self.__exec_command("rm -rf {0}/repl_bench_data".format(self.bin_path))
 		self.client.close()
 
-	def __exec_command(self, cmd):
-		stdin, stdout, stderr = self.client.exec_command(cmd)
+	def __exec_command(self, cmd, env=None):
+		stdin, stdout, stderr = self.client.exec_command(cmd, environment=env)
 		if stderr.channel.recv_exit_status() != 0:
 			print(stderr.read())
 			sys.exit("Command '{0}' failed with code: {1}".format(cmd,
@@ -98,25 +105,31 @@ class StandbyServer(object):
 			password=self.password, port=self.port)
 		self.client = client
 
+		p_env = None
+		if self.with_rsocket:
+			p_env = os.environ.copy()
+			p_env["WITH_RSOCKET"] = "true"
+
 		self.__exec_command(("{0}/bin/pg_basebackup -D {0}/repl_bench_data "
-			"-x -R -h {1} {2}").format(self.bin_path, self.primary_host,
-			"--with-rsocket" if self.with_rsocket else ""))
+			"-X fetch -R -h {1} -p 5555").format(self.bin_path, self.primary_host), p_env)
 
 		# Set configuration
 		self.__append_conf("listen_addresses", "*")
 		self.__append_conf("listen_rdma_addresses", "")
 
 	def run(self):
+		p_env = os.environ.copy()
+
 		self.__exec_command("{0}/bin/pg_ctl -w start -D {0}/repl_bench_data -l {0}/repl_bench_data/postgresql.log".format(
-			self.bin_path))
+			self.bin_path), p_env)
 
 	def stop(self):
 		self.__exec_command("{0}/bin/pg_ctl -w stop -D {0}/repl_bench_data".format(self.bin_path))
 		self.__exec_command("rm -rf {0}/repl_bench_data".format(self.bin_path))
 		self.client.close()
 
-	def __exec_command(self, cmd):
-		stdin, stdout, stderr = self.client.exec_command(cmd)
+	def __exec_command(self, cmd, env=None):
+		stdin, stdout, stderr = self.client.exec_command(cmd, environment=env)
 		if stderr.channel.recv_exit_status() != 0:
 			print(stderr.read())
 			sys.exit("Command '{0}' failed with code: {1}".format(cmd,
@@ -127,16 +140,22 @@ class StandbyServer(object):
 			name, value, self.bin_path))
 
 class Shell(object):
-	def __init__(self, cmd, wait_time = 0):
+	def __init__(self, cmd, with_rsocket, wait_time = 0):
 		self.cmd = cmd
 		self.stdout = None
+		self.with_rsocket = with_rsocket
 		self.run()
 
 	def run(self):
+		p_env = os.environ.copy()
+		if self.with_rsocket:
+			p_env["WITH_RSOCKET"] = "true"
+			p_env.pop("VMA_SELECT_POLL", None)
+
 		with tempfile.TemporaryFile() as out, \
 			tempfile.TemporaryFile() as err:
 			p = subprocess.Popen(self.cmd, shell=True,
-				stdout=out, stderr=err, close_fds=True)
+				stdout=out, stderr=err, close_fds=True, env=p_env)
 			p.wait()
 			out.seek(0)
 			err.seek(0)
@@ -199,20 +218,18 @@ class Test(object):
 		print("Run standby database server...")
 		self.standby_server.run()
 
-		for i in range(0, self.clients + 1, 4):
-			c = 1 if i == 0 else i
+		for i in range(0, self.clients):
 			if i != 0:
 				print("\n")
 
-			print("Run pgbench for {0} clients...".format(c))
+			print("Run pgbench for {0} clients...".format(i + 1))
 
-			out = Shell("{0}/bin/pgbench -h {1} {2} -c {3} -j {3} -T {4} -v pgbench".format(
+			out = Shell("{0}/bin/pgbench -h {1} -p 5555 -c {2} -j {2} -T {3} -v pgbench".format(
 				self.primary_server.bin_path, self.primary_server.host,
-				"--with-rsocket" if self.primary_server.with_rsocket else "",
-				c, self.run_time))
+				i + 1, self.run_time), self.primary_server.with_rsocket)
 			res = Result(out.stdout)
 
-			w.add_value(c, res.tps, res.trans, res.avg_latency)
+			w.add_value(i + 1, res.tps, res.trans, res.avg_latency)
 			print("Test result: tps={0} trans={1} avg_latency={2}".format(
 				res.tps, res.trans, res.avg_latency))
 
