@@ -36,7 +36,7 @@ class PrimaryServer(object):
 			self.__append_conf("listen_addresses", "")
 			self.__append_conf("listen_rdma_addresses", self.host)
 		else:
-			self.__append_conf("listen_addresses", self.host)
+			self.__append_conf("listen_addresses", "*")
 
 		self.__append_conf("shared_buffers", "8GB")
 		self.__append_conf("work_mem", "50MB")
@@ -89,14 +89,22 @@ class PrimaryServer(object):
 			name, value, self.bin_path))
 
 class StandbyServer(object):
-	def __init__(self, bin_path, primary_host, standby_host, user, password, port, with_rsocket):
+	def __init__(self, bin_path, primary_host, standby_host, user, password, port, rdma_type):
 		self.bin_path = bin_path
 		self.primary_host = primary_host
 		self.standby_host = standby_host
 		self.user = user
 		self.password = password
 		self.port = port
-		self.with_rsocket = with_rsocket
+		self.rdma_type = rdma_type
+
+		self.p_env = None
+		if self.rdma_type == "rsocket":
+			self.p_env = os.environ.copy()
+			self.p_env["WITH_RSOCKET"] = "true"
+		elif self.rdma_type == "ucx":
+			self.p_env = os.environ.copy()
+			self.p_env["WITH_UCX"] = "1"
 
 	def init(self):
 		client = paramiko.SSHClient()
@@ -105,23 +113,17 @@ class StandbyServer(object):
 			password=self.password, port=self.port)
 		self.client = client
 
-		p_env = None
-		if self.with_rsocket:
-			p_env = os.environ.copy()
-			p_env["WITH_RSOCKET"] = "true"
-
 		self.__exec_command(("{0}/bin/pg_basebackup -D {0}/repl_bench_data "
-			"-X fetch -R -h {1} -p 5555").format(self.bin_path, self.primary_host), p_env)
+			"-X fetch -R -h {1} -p 5555").format(self.bin_path, self.primary_host), self.p_env)
 
-		# Set configuration
-		self.__append_conf("listen_addresses", "*")
-		self.__append_conf("listen_rdma_addresses", "")
+		if self.rdma_type == "rsocket":
+			# Set configuration
+			self.__append_conf("listen_addresses", "*")
+			self.__append_conf("listen_rdma_addresses", "")
 
 	def run(self):
-		p_env = os.environ.copy()
-
 		self.__exec_command("{0}/bin/pg_ctl -w start -D {0}/repl_bench_data -l {0}/repl_bench_data/postgresql.log".format(
-			self.bin_path), p_env)
+			self.bin_path), self.p_env)
 
 	def stop(self):
 		self.__exec_command("{0}/bin/pg_ctl -w stop -D {0}/repl_bench_data".format(self.bin_path))
@@ -140,22 +142,17 @@ class StandbyServer(object):
 			name, value, self.bin_path))
 
 class Shell(object):
-	def __init__(self, cmd, with_rsocket, wait_time = 0):
+	def __init__(self, cmd, p_env, wait_time = 0):
 		self.cmd = cmd
 		self.stdout = None
-		self.with_rsocket = with_rsocket
+		self.p_env = p_env
 		self.run()
 
 	def run(self):
-		p_env = os.environ.copy()
-		if self.with_rsocket:
-			p_env["WITH_RSOCKET"] = "true"
-			p_env.pop("VMA_SELECT_POLL", None)
-
 		with tempfile.TemporaryFile() as out, \
 			tempfile.TemporaryFile() as err:
 			p = subprocess.Popen(self.cmd, shell=True,
-				stdout=out, stderr=err, close_fds=True, env=p_env)
+				stdout=out, stderr=err, close_fds=True, env=self.p_env)
 			p.wait()
 			out.seek(0)
 			err.seek(0)
@@ -202,9 +199,12 @@ class Test(object):
 		self.run_time = run_time
 
 	def run(self):
+		if self.standby_server.rdma_type is None:
+			fprefix = "socket"
+		else:
+			fprefix = self.standby_server.rdma_type
 		filename = "{0}_{1}_clients_{2}.csv".format(
-			"rsocket" if self.primary_server.with_rsocket else "socket",
-			self.clients, datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"))
+			fprefix, self.clients, datetime.datetime.now().strftime("%Y-%m-%d_%H-%M"))
 
 		w = Writer(filename)
 
@@ -226,7 +226,7 @@ class Test(object):
 
 			out = Shell("{0}/bin/pgbench -h {1} -p 5555 -c {2} -j {2} -T {3} -v pgbench".format(
 				self.primary_server.bin_path, self.primary_server.host,
-				i + 1, self.run_time), self.primary_server.with_rsocket)
+				i + 1, self.run_time), self.standby_server.p_env)
 			res = Result(out.stdout)
 
 			w.add_value(i + 1, res.tps, res.trans, res.avg_latency)
@@ -293,14 +293,20 @@ if __name__ == "__main__":
 		help="Maximum number of clients",
 		default=100,
 		dest="clients")
+	parser.add_argument("-r", "--rdma-type",
+		type=str,
+		help="API for RDMA",
+		default="rsocket",
+		choices=["rsocket", "ucx"],
+		dest="rdma_type")
 
 	args = parser.parse_args()
 
 	# Run rsocket test
 	prim_serv = PrimaryServer(args.bin_path, args.primary_host, args.scale,
-		args.user, args.password, args.port, True)
+		args.user, args.password, args.port, args.rdma_type == "rsocket")
 	standby_serv = StandbyServer(args.bin_path, args.primary_host, args.standby_host,
-		args.user, args.password, args.port, True)
+		args.user, args.password, args.port, args.rdma_type)
 	test = Test(prim_serv, standby_serv, args.clients, args.time)
 	test.run()
 
@@ -308,7 +314,7 @@ if __name__ == "__main__":
 	prim_serv = PrimaryServer(args.bin_path, args.primary_host, args.scale,
 		args.user, args.password, args.port, False)
 	standby_serv = StandbyServer(args.bin_path, args.primary_host, args.standby_host,
-		args.user, args.password, args.port, False)
+		args.user, args.password, args.port, None)
 	test = Test(prim_serv, standby_serv, args.clients, args.time)
 	test.run()
 
